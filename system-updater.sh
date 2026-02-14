@@ -3,11 +3,15 @@
 # Ubuntu System Updater v2.0
 # Расширенное приложение для управления обновлениями системы
 
-VERSION="2.0.0"
+VERSION="2.1.0"
 CONFIG_DIR="$HOME/.config/aupdate"
 LOG_FILE="$CONFIG_DIR/update.log"
 BACKUP_DIR="$CONFIG_DIR/backups"
 HISTORY_FILE="$CONFIG_DIR/history.log"
+CRON_FILE="$CONFIG_DIR/auto_update_cron"
+AUTO_UPDATE_CONFIG="$CONFIG_DIR/auto_update.conf"
+SCRIPT_PATH="/usr/local/bin/aupdate"
+GITHUB_REPO="https://github.com/Fixcat/UbuntuAutoUpdater.git"
 
 # Цвета
 RED='\033[0;31m'
@@ -724,6 +728,230 @@ update_from_repo() {
     echo -e "${GREEN}✓ Обновлено${NC}"
 }
 
+# Настроить автообновление
+setup_auto_update() {
+    echo -e "${BLUE}=== Настройка автообновления ===${NC}"
+    echo ""
+    echo -e "${YELLOW}Автообновление будет запускаться в фоновом режиме${NC}"
+    echo -e "${YELLOW}и обновлять все пакеты системы${NC}"
+    echo ""
+    
+    # Проверка существующего автообновления
+    if crontab -l 2>/dev/null | grep -q "aupdate-auto"; then
+        echo -e "${YELLOW}⚠ Автообновление уже настроено${NC}"
+        read -p "Перенастроить? (y/n): " reconfigure
+        if [ "$reconfigure" != "y" ] && [ "$reconfigure" != "Y" ]; then
+            return
+        fi
+    fi
+    
+    echo "Выберите интервал автообновления:"
+    echo "1) Каждые 2 часа"
+    echo "2) Каждые 4 часа"
+    echo "3) Каждые 6 часов"
+    echo "4) Каждые 12 часов"
+    echo "5) Каждые 24 часа (раз в день)"
+    echo "6) Свой интервал"
+    echo ""
+    read -p "Выберите (1-6): " interval_choice
+    
+    case $interval_choice in
+        1) CRON_SCHEDULE="0 */2 * * *" ; INTERVAL_DESC="каждые 2 часа" ;;
+        2) CRON_SCHEDULE="0 */4 * * *" ; INTERVAL_DESC="каждые 4 часа" ;;
+        3) CRON_SCHEDULE="0 */6 * * *" ; INTERVAL_DESC="каждые 6 часов" ;;
+        4) CRON_SCHEDULE="0 */12 * * *" ; INTERVAL_DESC="каждые 12 часов" ;;
+        5) CRON_SCHEDULE="0 0 * * *" ; INTERVAL_DESC="каждые 24 часа" ;;
+        6)
+            echo ""
+            read -p "Введите интервал в часах: " custom_hours
+            if ! [[ "$custom_hours" =~ ^[0-9]+$ ]]; then
+                echo -e "${RED}Неверный формат${NC}"
+                return
+            fi
+            CRON_SCHEDULE="0 */$custom_hours * * *"
+            INTERVAL_DESC="каждые $custom_hours часов"
+            ;;
+        *)
+            echo -e "${RED}Неверный выбор${NC}"
+            return
+            ;;
+    esac
+    
+    # Создание скрипта автообновления
+    cat > "$CRON_FILE" << 'EOF'
+#!/bin/bash
+# Автообновление системы
+LOG_FILE="$HOME/.config/aupdate/auto_update.log"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Начато автообновление" >> "$LOG_FILE"
+apt-get update >> "$LOG_FILE" 2>&1
+apt-get upgrade -y >> "$LOG_FILE" 2>&1
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Автообновление завершено" >> "$LOG_FILE"
+EOF
+    
+    chmod +x "$CRON_FILE"
+    
+    # Добавление в crontab
+    (crontab -l 2>/dev/null | grep -v "aupdate-auto"; echo "$CRON_SCHEDULE $CRON_FILE # aupdate-auto") | crontab -
+    
+    # Сохранение конфигурации
+    echo "ENABLED=true" > "$AUTO_UPDATE_CONFIG"
+    echo "SCHEDULE=$CRON_SCHEDULE" >> "$AUTO_UPDATE_CONFIG"
+    echo "INTERVAL=$INTERVAL_DESC" >> "$AUTO_UPDATE_CONFIG"
+    
+    echo ""
+    echo -e "${GREEN}✓ Автообновление настроено${NC}"
+    echo -e "${CYAN}Интервал: $INTERVAL_DESC${NC}"
+    echo -e "${CYAN}Расписание: $CRON_SCHEDULE${NC}"
+    echo ""
+    echo -e "${YELLOW}Логи автообновления: ~/.config/aupdate/auto_update.log${NC}"
+    
+    log_action "Настроено автообновление: $INTERVAL_DESC"
+}
+
+# Отключить автообновление
+disable_auto_update() {
+    echo -e "${BLUE}=== Отключение автообновления ===${NC}"
+    
+    # Проверка наличия автообновления
+    if ! crontab -l 2>/dev/null | grep -q "aupdate-auto"; then
+        echo -e "${YELLOW}Автообновление не настроено${NC}"
+        return
+    fi
+    
+    read -p "Отключить автообновление? (y/n): " confirm
+    if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
+        echo -e "${YELLOW}Отменено${NC}"
+        return
+    fi
+    
+    # Удаление из crontab
+    crontab -l 2>/dev/null | grep -v "aupdate-auto" | crontab -
+    
+    # Обновление конфигурации
+    if [ -f "$AUTO_UPDATE_CONFIG" ]; then
+        sed -i 's/ENABLED=true/ENABLED=false/' "$AUTO_UPDATE_CONFIG"
+    fi
+    
+    echo -e "${GREEN}✓ Автообновление отключено${NC}"
+    log_action "Автообновление отключено"
+}
+
+# Показать статус автообновления
+show_auto_update_status() {
+    echo -e "${BLUE}=== Статус автообновления ===${NC}"
+    
+    if crontab -l 2>/dev/null | grep -q "aupdate-auto"; then
+        echo -e "${GREEN}✓ Автообновление включено${NC}"
+        
+        if [ -f "$AUTO_UPDATE_CONFIG" ]; then
+            source "$AUTO_UPDATE_CONFIG"
+            echo -e "${CYAN}Интервал: $INTERVAL${NC}"
+            echo -e "${CYAN}Расписание: $SCHEDULE${NC}"
+        fi
+        
+        # Показать последние записи из лога
+        if [ -f "$HOME/.config/aupdate/auto_update.log" ]; then
+            echo ""
+            echo -e "${YELLOW}Последние записи:${NC}"
+            tail -5 "$HOME/.config/aupdate/auto_update.log"
+        fi
+    else
+        echo -e "${RED}✗ Автообновление отключено${NC}"
+    fi
+    echo ""
+}
+
+# Обновить само приложение
+update_application() {
+    echo -e "${BLUE}=== Обновление приложения ===${NC}"
+    echo -e "${YELLOW}Текущая версия: $VERSION${NC}"
+    echo ""
+    
+    # Проверка интернета
+    if ! check_internet; then
+        return
+    fi
+    
+    echo -e "${YELLOW}Проверка обновлений...${NC}"
+    
+    # Создание временной директории
+    TEMP_DIR=$(mktemp -d)
+    cd "$TEMP_DIR" || return
+    
+    # Клонирование репозитория
+    echo -e "${YELLOW}Загрузка последней версии...${NC}"
+    git clone --depth 1 "$GITHUB_REPO" . > /dev/null 2>&1
+    
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}✗ Ошибка загрузки${NC}"
+        cd - > /dev/null
+        rm -rf "$TEMP_DIR"
+        return
+    fi
+    
+    # Проверка версии
+    NEW_VERSION=$(grep "^VERSION=" system-updater.sh | cut -d'"' -f2)
+    
+    if [ -z "$NEW_VERSION" ]; then
+        echo -e "${RED}✗ Не удалось определить версию${NC}"
+        cd - > /dev/null
+        rm -rf "$TEMP_DIR"
+        return
+    fi
+    
+    echo -e "${CYAN}Доступная версия: $NEW_VERSION${NC}"
+    
+    if [ "$VERSION" = "$NEW_VERSION" ]; then
+        echo -e "${GREEN}✓ У вас установлена последняя версия${NC}"
+        cd - > /dev/null
+        rm -rf "$TEMP_DIR"
+        return
+    fi
+    
+    echo ""
+    read -p "Обновить до версии $NEW_VERSION? (y/n): " confirm
+    
+    if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
+        echo -e "${YELLOW}Обновление отменено${NC}"
+        cd - > /dev/null
+        rm -rf "$TEMP_DIR"
+        return
+    fi
+    
+    # Резервная копия текущей версии
+    echo -e "${YELLOW}Создание резервной копии...${NC}"
+    cp "$SCRIPT_PATH" "$SCRIPT_PATH.backup"
+    
+    # Установка новой версии
+    echo -e "${YELLOW}Установка новой версии...${NC}"
+    cp system-updater.sh "$SCRIPT_PATH"
+    chmod +x "$SCRIPT_PATH"
+    
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}✓ Приложение успешно обновлено!${NC}"
+        echo -e "${CYAN}Новая версия: $NEW_VERSION${NC}"
+        echo ""
+        echo -e "${YELLOW}Резервная копия сохранена: $SCRIPT_PATH.backup${NC}"
+        log_action "Приложение обновлено с $VERSION до $NEW_VERSION"
+        
+        # Очистка
+        cd - > /dev/null
+        rm -rf "$TEMP_DIR"
+        
+        echo ""
+        read -p "Перезапустить приложение? (y/n): " restart
+        if [ "$restart" = "y" ] || [ "$restart" = "Y" ]; then
+            exec "$SCRIPT_PATH"
+        fi
+    else
+        echo -e "${RED}✗ Ошибка установки${NC}"
+        echo -e "${YELLOW}Восстановление из резервной копии...${NC}"
+        cp "$SCRIPT_PATH.backup" "$SCRIPT_PATH"
+        cd - > /dev/null
+        rm -rf "$TEMP_DIR"
+    fi
+}
+
 # Показать версию
 show_version() {
     echo -e "${BLUE}╔════════════════════════════════════════╗${NC}"
@@ -788,6 +1016,14 @@ show_menu() {
     echo "35) Экспорт логов"
     echo "36) Очистить логи"
     echo ""
+    echo -e "${CYAN}=== АВТООБНОВЛЕНИЕ ===${NC}"
+    echo "37) Настроить автообновление"
+    echo "38) Отключить автообновление"
+    echo "39) Статус автообновления"
+    echo ""
+    echo -e "${CYAN}=== СИСТЕМА ===${NC}"
+    echo "40) Обновить приложение"
+    echo ""
     echo "0)  Выход"
     echo ""
 }
@@ -799,7 +1035,7 @@ main() {
     
     while true; do
         show_menu
-        read -p "Выберите действие (0-36): " choice
+        read -p "Выберите действие (0-40): " choice
         
         case $choice in
             1) scan_updates; result=$?; [ $result -eq 0 ] && show_updates; read -p "Enter..." ;;
@@ -838,6 +1074,10 @@ main() {
             34) test_repo_speed; read -p "Enter..." ;;
             35) export_logs; read -p "Enter..." ;;
             36) clear_logs; read -p "Enter..." ;;
+            37) setup_auto_update; read -p "Enter..." ;;
+            38) disable_auto_update; read -p "Enter..." ;;
+            39) show_auto_update_status; read -p "Enter..." ;;
+            40) update_application; read -p "Enter..." ;;
             0) echo -e "${GREEN}Выход${NC}"; log_action "Программа завершена"; exit 0 ;;
             *) echo -e "${RED}Неверный выбор${NC}"; sleep 2 ;;
         esac
